@@ -6,44 +6,41 @@ import os
 import matplotlib.pyplot as plt
 
 # === CONFIGURABLE PARAMETERS ===
-MIN_HEIGHT = 0.5   # Minimum height (in meters) to include LiDAR points
-MAX_HEIGHT = 2.5   # Maximum height (in meters) to include LiDAR points
+MIN_HEIGHT = 0
+MAX_HEIGHT = 5
+MAX_DISTANCE = 30  # Max distance in meters
 
 # === Load YOLO model ===
 model = YOLO("yolov8n.pt")
 
 # === Predefined values ===
-average_object_widths = {
-    "car": 2,
-    "person": 0.4,
-    "truck": 2.5,
-    "bus": 2.8,
-    "bicycle": 0.6,
-    "motorcycle": 0.6,
+average_object_sizes = {
+    "car": {"width": 2},
+    "person": {"height": 1.7},
+    "truck": {"width": 2.5},
+    "bus": {"width": 2.8},
+    "bicycle": {"width": 0.6},
+    "motorcycle": {"width": 0.6},
 }
 
+# === Car positions and orientations ===
 x_carA = -50.25553131103516
 z_carA = 19.79990005493164
+rot_carA = 90.15917205810548
+
 x_carB = -35.94367599487305
 z_carB = 28.445274353027344
+rot_carB = 0.1591979712247848
 
-# === Plot Car A and Car B on 2D plane ===
-plt.figure(figsize=(8, 6))
-plt.plot(x_carA, z_carA, 'ro', label='Car A')
-plt.plot(x_carB, z_carB, 'bo', label='Car B')
-plt.text(x_carA, z_carA + 1, 'Car A', color='red', ha='center')
-plt.text(x_carB, z_carB + 1, 'Car B', color='blue', ha='center')
-plt.xlabel('X Position')
-plt.ylabel('Z Position')
-plt.title('Car Positions on 2D Plane')
-plt.grid(True)
-plt.legend()
-plt.axis('equal')
-
-objectsX = []
-objectsZ = []
+# === Camera intrinsics ===
+K = np.array([
+    [2058.72664, 0, 960],
+    [0, 2058.72664, 560],
+    [0, 0, 1]
+])
 
 
+# === Utility functions ===
 def load_lidar_data_ply(file_path):
     if not os.path.exists(file_path):
         print(f"[ERROR] LiDAR file not found: {file_path}")
@@ -52,17 +49,8 @@ def load_lidar_data_ply(file_path):
     return np.asarray(pcd.points)
 
 
-def rotate_points_x(points, theta_x):
-    rotation_matrix_x = np.array([
-        [1, 0, 0],
-        [0, np.cos(theta_x), -np.sin(theta_x)],
-        [0, np.sin(theta_x), np.cos(theta_x)]
-    ])
-    return np.dot(points, rotation_matrix_x.T)
-
-
-def calculate_depth(focal_length, real_world_width, image_width, bounding_box_width):
-    return (real_world_width * focal_length) / bounding_box_width
+def calculate_depth_estimate(focal_length, real_size, image_size):
+    return (real_size * focal_length) / image_size
 
 
 def convert_to_3d_coordinates(u, v, depth, K):
@@ -72,121 +60,129 @@ def convert_to_3d_coordinates(u, v, depth, K):
     return camera_coords
 
 
-def filter_lidar_points_by_height_range(lidar_points, min_height=0.3, max_height=2.5):
-    return lidar_points[(lidar_points[:, 2] >= min_height) & (lidar_points[:, 2] <= max_height)]
+def scale_bounding_box(x1, y1, x2, y2, scale_factor=1.7):
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    width = x2 - x1
+    height = y2 - y1
+    new_width = width * scale_factor
+    new_height = height * scale_factor
+    new_x1 = int(center_x - new_width / 2)
+    new_y1 = int(center_y - new_height / 2)
+    new_x2 = int(center_x + new_width / 2)
+    new_y2 = int(center_y + new_height / 2)
+    return new_x1, new_y1, new_x2, new_y2
 
 
-def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model, objects_x, objects_z, car_x_pos, car_z_pos,
-                            min_height=0.5, max_height=2.5):
-    lidar_points = filter_lidar_points_by_height_range(lidar_points, min_height, max_height)
-    lidar_points = rotate_points_x(lidar_points, theta_x)
+def rotate_and_translate(local_points, car_pos, car_rot_deg):
+    # Convert rotation from degrees to radians
+    theta = np.radians(car_rot_deg - 90)
 
-    T_lidar_to_camera = np.array([
-        [0, -1, 0, 0.5],
-        [0, 0, -1, 0.2],
-        [1, 0, 0, 0.3],
-        [0, 0, 0, 1]
+    # Create rotation matrix for the car's rotation
+    R = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta), np.cos(theta)]
     ])
 
-    homogeneous_points = np.hstack((lidar_points, np.ones((lidar_points.shape[0], 1))))
-    transformed_points = (T_lidar_to_camera @ homogeneous_points.T).T[:, :3]
+    # Apply rotation and translation (car's position)
+    rotated_points = [car_pos + R @ np.array([x, z]) for x, z in local_points]
 
-    mask = transformed_points[:, 2] > 0
-    transformed_points = transformed_points[mask]
+    return rotated_points
 
-    projected = (K @ transformed_points.T).T
-    u = projected[:, 0] / projected[:, 2]
-    v = projected[:, 1] / projected[:, 2]
 
+def estimate_object_distances(camera_image, K, model):
+    focal_length = K[0, 0]
     results = model(camera_image, verbose=False)[0]
     boxes = results.boxes.xyxy.cpu().numpy().astype(int)
     class_ids = results.boxes.cls.cpu().numpy().astype(int)
     class_names = results.names
 
-    for i in range(len(u)):
-        x, y = int(u[i]), int(v[i])
-        if 0 <= x < camera_image.shape[1] and 0 <= y < camera_image.shape[0]:
-            is_inside_box = False
-            for idx, (x1, y1, x2, y2) in enumerate(boxes):
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    is_inside_box = True
-                    break
-            color = (0, 255, 0) if is_inside_box else (0, 0, 255)
-            cv2.circle(camera_image, (x, y), 1, color, -1)
+    local_object_coords = []
 
-    focal_length = K[0, 0]
     for idx, (x1, y1, x2, y2) in enumerate(boxes):
+        object_type = class_names[class_ids[idx]]
         u_center = (x1 + x2) / 2
         v_center = (y1 + y2) / 2
-        class_id = class_ids[idx]
-        object_type = class_names[class_id] if class_id < len(class_names) else "unknown"
 
-        in_box_mask = (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
-        in_box_depths = transformed_points[in_box_mask][:, 2]
-
-        if len(in_box_depths) > 0:
-            depth = np.min(in_box_depths)
+        if object_type == "person":
+            bbox_size = y2 - y1
+            real_size = average_object_sizes.get("person", {}).get("height", 1.7)
         else:
-            bounding_box_width = x2 - x1
-            if bounding_box_width == 0:
-                continue
-            depth = calculate_depth(focal_length, 1.0, camera_image.shape[1], bounding_box_width)
+            bbox_size = x2 - x1
+            real_size = average_object_sizes.get(object_type, {}).get("width", 2)
 
-        camera_coords = convert_to_3d_coordinates(u_center, v_center, depth, K)
-        x_pos = camera_coords[0]
-        z_pos = camera_coords[2]
+        if bbox_size == 0:
+            continue
+
+        depth = calculate_depth_estimate(focal_length, real_size, bbox_size)
+        coords = convert_to_3d_coordinates(u_center, v_center, depth, K)
+        x_pos, z_pos = coords[0], coords[2]
+
+        local_object_coords.append((x_pos, z_pos))
 
         cv2.rectangle(camera_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
-        pos_label = f"X: {x_pos:.2f}m, Z: {z_pos:.2f}m"
-        cv2.putText(camera_image, pos_label, (x1, y2 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        label = f"{object_type}: X={x_pos:.2f}m, Z={z_pos:.2f}m"
+        cv2.putText(camera_image, label, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    return camera_image
-
-
-def visualize_lidar_point_cloud(points, title="Open3D Point Cloud"):
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    o3d.visualization.draw_geometries([pcd], window_name=title)
+    return camera_image, local_object_coords
 
 
-def process_car_data(car_number, objects_x, objects_y, car_x_pos, car_z_pos):
-    theta_x = np.radians(10)
-    lidar_file_path = f"Fusion_event-main/data/Lidar{car_number}/{car_number}_001.ply"
+def filter_objects_within_distance(objects, car_pos, max_distance):
+    filtered_objects = []
+    for obj in objects:
+        x, z = obj
+        dist = np.linalg.norm(np.array([x - car_pos[0], z - car_pos[1]]))
+        if dist <= max_distance:
+            filtered_objects.append(obj)
+    return filtered_objects
+
+
+# === Plotting ===
+all_world_objects = []
+
+
+def process_car_data(car_number, car_x_pos, car_z_pos, car_rot_deg, color):
     camera_image_path = f"Fusion_event-main/data/Camera{car_number}/{car_number}_001.png"
-
-    print(f"\n[INFO] Loading data for Car {car_number}...")
-    lidar_points = load_lidar_data_ply(lidar_file_path)
-    if lidar_points is None:
-        return
-
-    lidar_points = filter_lidar_points_by_height_range(lidar_points, MIN_HEIGHT, MAX_HEIGHT)
-    visualize_lidar_point_cloud(lidar_points, title=f"Filtered LiDAR - Car {car_number}")
-
+    print(f"\n[INFO] Loading image for Car {car_number}...")
     camera_image = cv2.imread(camera_image_path)
     if camera_image is None:
-        print(f"[ERROR] Could not load camera image from {camera_image_path}")
+        print(f"[ERROR] Could not load image {camera_image_path}")
         return
 
-    K = np.array([
-        [2058.72664, 0, 960],
-        [0, 2058.72664, 560],
-        [0, 0, 1]
-    ])
-
-    camera_image_with_points = project_lidar_to_camera(
-        lidar_points, camera_image, K, theta_x, model,
-        objects_x, objects_y, car_x_pos, car_z_pos,
-        MIN_HEIGHT, MAX_HEIGHT
-    )
-
-    window_name = f"Camera Image with Projected LiDAR Points - Car {car_number}"
-    cv2.imshow(window_name, camera_image_with_points)
+    estimated_image, local_objects = estimate_object_distances(camera_image, K, model)
+    window_name = f"Estimated Distances - Car {car_number}"
+    cv2.imshow(window_name, estimated_image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+    car_pos = np.array([car_x_pos, car_z_pos])
+    world_coords = rotate_and_translate(local_objects, car_pos, car_rot_deg)
 
-# Run both cars
-process_car_data('A', objectsX, objectsZ, x_carA, z_carA)
-process_car_data('B', objectsX, objectsZ, x_carB, z_carB)
+    # Filter objects within MAX_DISTANCE from the car
+    filtered_objects = filter_objects_within_distance(world_coords, car_pos, MAX_DISTANCE)
+    all_world_objects.extend((coord, color) for coord in filtered_objects)
 
+
+# === Run processing ===
+process_car_data('A', x_carA, z_carA, rot_carA, 'red')
+process_car_data('B', x_carB, z_carB, rot_carB, 'blue')
+
+# === Final plot ===
+plt.figure(figsize=(10, 8))
+plt.plot(x_carA, z_carA, 'ro', label='Car A')
+plt.plot(x_carB, z_carB, 'bo', label='Car B')
+plt.text(x_carA, z_carA + 1, 'Car A', color='red', ha='center')
+plt.text(x_carB, z_carB + 1, 'Car B', color='blue', ha='center')
+
+# Plot only filtered objects
+for (x, z), color in all_world_objects:
+    plt.plot(x, z, marker='^', color=color)
+
+plt.xlabel('X Position')
+plt.ylabel('Z Position')
+plt.title('Car and Object Positions on 2D Plane')
+plt.grid(True)
+plt.axis('equal')
+plt.legend()
+plt.tight_layout()
 plt.show()
