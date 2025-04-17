@@ -20,7 +20,7 @@ def rotate_points_x(points, theta_x):
     ])
     return np.dot(points, rotation_matrix_x.T)
 
-def project_lidar_to_camera(lidar_points, camera_image, K, theta_x):
+def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model):
     """ Rotate LiDAR points, transform, and project them onto the camera image. """
     # Rotate the LiDAR points around the X-axis
     lidar_points = rotate_points_x(lidar_points, theta_x)
@@ -79,29 +79,37 @@ def project_lidar_to_camera(lidar_points, camera_image, K, theta_x):
 
     return camera_image
 
-# Example usage of the new function:
-# Define the rotation angle in radians (for top-to-bottom rotation)
-theta_x = np.radians(10)  # Rotate 10 degrees around the X-axis
+# Function to process both cars (A and B)
+def process_car_data(car_number):
+    """ Process the data for the given car number (A or B). """
+    # Define the rotation angle in radians (for top-to-bottom rotation)
+    theta_x = np.radians(10)  # Rotate 10 degrees around the X-axis
 
-# Load LiDAR data from the PLY file
-lidar_file_path = "Fusion_event-main/data/LidarA/A_001.ply"  # Update with your actual file path
-lidar_points = load_lidar_data_ply(lidar_file_path)
+    # Define file paths based on car number
+    lidar_file_path = f"Fusion_event-main/data/Lidar{car_number}/{car_number}_001.ply"  # Update with your actual file path
+    camera_image_path = f"Fusion_event-main/data/Camera{car_number}/{car_number}_001.png"  # Update with your actual file path
 
-# Load camera image
-camera_image_path = "Fusion_event-main/data/CameraA/A_001.png"
-camera_image = cv2.imread(camera_image_path)
+    # Load LiDAR data from the PLY file
+    lidar_points = load_lidar_data_ply(lidar_file_path)
 
-# Camera intrinsic matrix (example values)
-K = np.array([
-    [2058.72664, 0, 960],
-    [0, 2058.72664, 560],
-    [0, 0, 1]
-])
+    # Load camera image
+    camera_image = cv2.imread(camera_image_path)
 
-# Project LiDAR points onto camera image with rotation
-camera_image_with_points = project_lidar_to_camera(lidar_points, camera_image, K, theta_x)
+    # Camera intrinsic matrix (example values)
+    K = np.array([
+        [2058.72664, 0, 960],
+        [0, 2058.72664, 560],
+        [0, 0, 1]
+    ])
 
-# Display the image with projected points
-cv2.imshow("Camera Image with Projected LiDAR Points", camera_image_with_points)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    # Project LiDAR points onto camera image with rotation
+    camera_image_with_points = project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model)
+
+    # Display the image with projected points
+    cv2.imshow(f"Camera Image with Projected LiDAR Points - Car {car_number}", camera_image_with_points)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+# Process Car A and Car B
+process_car_data('A')  # For Car A
+process_car_data('B')  # For Car B
