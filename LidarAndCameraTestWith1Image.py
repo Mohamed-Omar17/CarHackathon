@@ -4,6 +4,7 @@ import numpy as np
 import open3d as o3d
 import os
 import matplotlib.pyplot as plt
+import json
 
 # === CONFIGURABLE PARAMETERS ===
 MIN_HEIGHT = 0
@@ -22,15 +23,6 @@ average_object_sizes = {
     "bicycle": {"width": 0.6},
     "motorcycle": {"width": 0.6},
 }
-
-# === Car positions and orientations ===
-x_carA = -50.25553131103516
-z_carA = 19.79990005493164
-rot_carA = 90.15917205810548
-
-x_carB = -35.94367599487305
-z_carB = 28.445274353027344
-rot_carB = 0.1591979712247848
 
 # === Camera intrinsics ===
 K = np.array([
@@ -163,26 +155,56 @@ def process_car_data(car_number, car_x_pos, car_z_pos, car_rot_deg, color):
     all_world_objects.extend((coord, color) for coord in filtered_objects)
 
 
-# === Run processing ===
-process_car_data('A', x_carA, z_carA, rot_carA, 'red')
-process_car_data('B', x_carB, z_carB, rot_carB, 'blue')
+# === Load and process JSON files ===
+json_directory = "Fusion_event-main/data/input"  # Replace with the actual path to your JSON files directory
 
-# === Final plot ===
-plt.figure(figsize=(10, 8))
-plt.plot(x_carA, z_carA, 'ro', label='Car A')
-plt.plot(x_carB, z_carB, 'bo', label='Car B')
-plt.text(x_carA, z_carA + 1, 'Car A', color='red', ha='center')
-plt.text(x_carB, z_carB + 1, 'Car B', color='blue', ha='center')
+# Get the list of all JSON files in the directory
+json_files = [f for f in os.listdir(json_directory) if f.endswith('.json')]
 
-# Plot only filtered objects
-for (x, z), color in all_world_objects:
-    plt.plot(x, z, marker='^', color=color)
+# Loop through each JSON file to process car data
+# Loop through each JSON file to process car data
+for json_file in json_files:
+    json_file_path = os.path.join(json_directory, json_file)
 
-plt.xlabel('X Position')
-plt.ylabel('Z Position')
-plt.title('Car and Object Positions on 2D Plane')
-plt.grid(True)
-plt.axis('equal')
-plt.legend()
-plt.tight_layout()
-plt.show()
+    with open(json_file_path, 'r') as f:
+        car_data = json.load(f)
+
+    x_carA = car_data["CarA_Location"][0]
+    z_carA = car_data["CarA_Location"][1]
+    rot_carA = car_data["CarA_Rotation"]
+
+    x_carB = car_data["CarB_Location"][0]
+    z_carB = car_data["CarB_Location"][1]
+    rot_carB = car_data["CarB_Rotation"]
+
+    print(str(x_carA) + " " + str(z_carA) + " " + str(x_carB) + " " + " " + str(z_carB))
+
+    process_car_data('A', x_carA, z_carA, rot_carA, 'red')
+    process_car_data('B', x_carB, z_carB, rot_carB, 'blue')
+
+    carA_camera = car_data["CarA_Camera"]
+    carB_camera = car_data["CarB_Camera"]
+    print(f"Processing data from {json_file} with camera paths: {carA_camera}, {carB_camera}")
+
+    # === Per-file plot ===
+    plt.figure(figsize=(10, 8))
+    plt.plot(x_carA, z_carA, 'ro', label='Car A')
+    plt.plot(x_carB, z_carB, 'bo', label='Car B')
+    plt.text(x_carA, z_carA + 1, 'Car A', color='red', ha='center')
+    plt.text(x_carB, z_carB + 1, 'Car B', color='blue', ha='center')
+
+    for (x, z), color in all_world_objects:
+        plt.plot(x, z, marker='^', color=color)
+
+    plt.xlabel('X Position')
+    plt.ylabel('Z Position')
+    plt.title(f'Car and Object Positions - {json_file}')
+    plt.grid(True)
+    plt.axis('equal')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Clear world object list for the next file
+    all_world_objects.clear()
+
