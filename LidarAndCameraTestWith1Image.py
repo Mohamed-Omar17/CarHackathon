@@ -85,26 +85,38 @@ def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model):
     focal_length = K[0, 0]  # Focal length is usually the value in K[0, 0] for most cameras
     # Loop through the bounding boxes and calculate depth for each object
     for idx, (x1, y1, x2, y2) in enumerate(boxes):
-        object_type = class_names[class_ids[idx]]
-        real_world_width = average_object_widths.get(object_type, 1.0)  # fallback if unknown
-        bounding_box_width = x2 - x1
-
-        if bounding_box_width == 0:
-            continue  # avoid division by zero
-
-        depth = calculate_depth(focal_length, real_world_width, camera_image.shape[1], bounding_box_width)
-
-        print(f"Object: {object_type}, Depth: {depth:.2f} meters")
-
         u_center = (x1 + x2) / 2
         v_center = (y1 + y2) / 2
+
+        # Get class info
+        class_id = class_ids[idx]
+        object_type = class_names[class_id] if class_id < len(class_names) else "unknown"
+        object_type_lower = object_type.lower()
+        real_world_width = average_object_widths.get(object_type_lower, 1.0)
+
+        # Mask projected LiDAR points that fall inside the current bounding box
+        in_box_mask = (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
+        in_box_depths = transformed_points[in_box_mask][:, 2]
+
+        # Use LiDAR depth if points are found inside the box
+        if len(in_box_depths) > 0:
+            depth = np.median(in_box_depths)
+            depth_source = "LiDAR"
+        else:
+            # Fall back to width-based estimate
+            bounding_box_width = x2 - x1
+            if bounding_box_width == 0:
+                continue  # avoid division by zero
+            depth = calculate_depth(focal_length, real_world_width, camera_image.shape[1], bounding_box_width)
+            depth_source = "YOLO"
+
         camera_coords = convert_to_3d_coordinates(u_center, v_center, depth, K)
 
-        print(f"Object: {object_type}, 3D Coordinates: {camera_coords}")
-
+        # Annotate image
+        print(f"Object: {object_type}, Depth: {depth:.2f} meters (via {depth_source})")
         cv2.rectangle(camera_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
-        label = f"{object_type} {depth:.2f}m"
-        cv2.putText(camera_image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
+        label = f"{object_type} {depth:.2f}m ({depth_source})"
+        cv2.putText(camera_image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
     return camera_image
 
 
