@@ -6,10 +6,24 @@ import open3d as o3d
 # Initialize YOLO model
 model = YOLO("yolov8n.pt")
 
+average_object_widths = {
+    "car": 2,
+    "person": 0.4,
+    "truck": 2.5,
+    "bus": 2.8,
+    "bicycle": 0.6,
+    "motorcycle": 0.6,
+    # Add more if needed
+}
+
+
+
+
 def load_lidar_data_ply(file_path):
     """ Load LiDAR data from a PLY file using Open3D """
     pcd = o3d.io.read_point_cloud(file_path)
     return np.asarray(pcd.points)
+
 
 def rotate_points_x(points, theta_x):
     """ Rotate points around the X-axis by angle theta_x (radians). """
@@ -20,6 +34,20 @@ def rotate_points_x(points, theta_x):
     ])
     return np.dot(points, rotation_matrix_x.T)
 
+
+def calculate_depth(focal_length, real_world_width, image_width, bounding_box_width):
+    """ Calculate depth using the real-world width and bounding box width """
+    return (real_world_width * focal_length) / bounding_box_width
+
+
+def convert_to_3d_coordinates(u, v, depth, K):
+    """ Convert 2D image coordinates to 3D world coordinates using depth and camera matrix """
+    inv_K = np.linalg.inv(K)
+    pixel_coords = np.array([u, v, 1])
+    camera_coords = depth * inv_K @ pixel_coords
+    return camera_coords
+
+
 def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model):
     """ Rotate LiDAR points, transform, and project them onto the camera image. """
     # Rotate the LiDAR points around the X-axis
@@ -27,7 +55,7 @@ def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model):
 
     # Transformation matrix from LiDAR to Camera coordinates (mock example)
     T_lidar_to_camera = np.array([
-        [0, -1, 0, 0.5],   # This should be adjusted based on your setup
+        [0, -1, 0, 0.5],  # Adjust based on your setup
         [0, 0, -1, 0.2],
         [1, 0, 0, 0.3],
         [0, 0, 0, 1]
@@ -46,38 +74,39 @@ def project_lidar_to_camera(lidar_points, camera_image, K, theta_x, model):
     u = projected[:, 0] / projected[:, 2]  # x / z
     v = projected[:, 1] / projected[:, 2]  # y / z
 
-    # Debug: Print the first few projected points
-    print("First few projected points (u, v):")
-    print(list(zip(u[:5], v[:5])))
-
     # Run YOLO on the image to get bounding boxes
     results = model(camera_image, verbose=False)[0]
     boxes = results.boxes.xyxy.cpu().numpy().astype(int)
+    class_ids = results.boxes.cls.cpu().numpy().astype(int)  # Get class IDs
+    confidences = results.boxes.conf.cpu().numpy()  # Confidence values
+    class_names = results.names  # Object class names
 
-    # Draw points: green if inside detected object, red otherwise
-    for i in range(len(u)):
-        px, py = int(u[i]), int(v[i])
+    # Camera parameters
+    focal_length = K[0, 0]  # Focal length is usually the value in K[0, 0] for most cameras
+    # Loop through the bounding boxes and calculate depth for each object
+    for idx, (x1, y1, x2, y2) in enumerate(boxes):
+        object_type = class_names[class_ids[idx]]
+        real_world_width = average_object_widths.get(object_type, 1.0)  # fallback if unknown
+        bounding_box_width = x2 - x1
 
-        # Check if the point is within image boundaries
-        if px < 0 or px >= camera_image.shape[1] or py < 0 or py >= camera_image.shape[0]:
-            continue  # Skip if point is outside the image
+        if bounding_box_width == 0:
+            continue  # avoid division by zero
 
-        color = (0, 0, 255)  # Default: red
+        depth = calculate_depth(focal_length, real_world_width, camera_image.shape[1], bounding_box_width)
 
-        # Check if the point is inside any bounding box
-        for (x1, y1, x2, y2) in boxes:
-            if x1 <= px <= x2 and y1 <= py <= y2:
-                color = (0, 255, 0)  # Inside object: green
-                break
+        print(f"Object: {object_type}, Depth: {depth:.2f} meters")
 
-        # Draw point on image
-        cv2.circle(camera_image, (px, py), 2, color, -1)
+        u_center = (x1 + x2) / 2
+        v_center = (y1 + y2) / 2
+        camera_coords = convert_to_3d_coordinates(u_center, v_center, depth, K)
 
-    # Draw YOLO bounding boxes on the image
-    for (x1, y1, x2, y2) in boxes:
+        print(f"Object: {object_type}, 3D Coordinates: {camera_coords}")
+
         cv2.rectangle(camera_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
-
+        label = f"{object_type} {depth:.2f}m"
+        cv2.putText(camera_image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
     return camera_image
+
 
 # Function to process both cars (A and B)
 def process_car_data(car_number):
@@ -109,6 +138,7 @@ def process_car_data(car_number):
     cv2.imshow(f"Camera Image with Projected LiDAR Points - Car {car_number}", camera_image_with_points)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
 
 # Process Car A and Car B
 process_car_data('A')  # For Car A
